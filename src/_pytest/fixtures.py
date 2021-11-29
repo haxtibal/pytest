@@ -5,6 +5,7 @@ import sys
 import warnings
 from collections import defaultdict
 from collections import deque
+from collections.abc import Hashable
 from contextlib import suppress
 from pathlib import Path
 from types import TracebackType
@@ -240,6 +241,24 @@ def getfixturemarker(obj: object) -> Optional["FixtureFunctionMarker"]:
 _Key = Tuple[object, ...]
 
 
+@attr.s(auto_attribs=True, eq=False)
+class SafeHashWrapper:
+    obj: Any
+
+    def __eq__(self, other) -> Any:
+        try:
+            res = self.obj == other
+            bool(res)
+            return res
+        except Exception:
+            return id(self.obj) == id(other)
+
+    def __hash__(self) -> Any:
+        if isinstance(self.obj, Hashable):
+            return hash(self.obj)
+        return hash(id(self.obj))
+
+
 def get_parametrized_fixture_keys(item: nodes.Item, scope: Scope) -> Iterator[_Key]:
     """Return list of keys for all parametrized arguments which match
     the specified scope."""
@@ -256,15 +275,16 @@ def get_parametrized_fixture_keys(item: nodes.Item, scope: Scope) -> Iterator[_K
         for argname, param_index in sorted(cs.indices.items()):
             if cs._arg2scope[argname] != scope:
                 continue
+            param = SafeHashWrapper(cs.params.get(argname, param_index))
             if scope is Scope.Session:
-                key: _Key = (argname, param_index)
+                key: _Key = (argname, param)
             elif scope is Scope.Package:
-                key = (argname, param_index, item.path.parent)
+                key = (argname, param, item.path.parent)
             elif scope is Scope.Module:
-                key = (argname, param_index, item.path)
+                key = (argname, param, item.path)
             elif scope is Scope.Class:
                 item_cls = item.cls  # type: ignore[attr-defined]
-                key = (argname, param_index, item.path, item_cls)
+                key = (argname, param, item.path, item_cls)
             else:
                 assert_never(scope)
             yield key
