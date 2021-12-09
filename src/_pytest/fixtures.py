@@ -5,7 +5,6 @@ import sys
 import warnings
 from collections import defaultdict
 from collections import deque
-from collections.abc import Hashable
 from contextlib import suppress
 from pathlib import Path
 from types import TracebackType
@@ -241,24 +240,6 @@ def getfixturemarker(obj: object) -> Optional["FixtureFunctionMarker"]:
 _Key = Tuple[object, ...]
 
 
-@attr.s(auto_attribs=True, eq=False)
-class SafeHashWrapper:
-    obj: Any
-
-    def __eq__(self, other) -> Any:
-        try:
-            res = self.obj == other
-            bool(res)
-            return res
-        except Exception:
-            return id(self.obj) == id(other)
-
-    def __hash__(self) -> Any:
-        if isinstance(self.obj, Hashable):
-            return hash(self.obj)
-        return hash(id(self.obj))
-
-
 def get_parametrized_fixture_keys(item: nodes.Item, scope: Scope) -> Iterator[_Key]:
     """Return list of keys for all parametrized arguments which match
     the specified scope."""
@@ -272,19 +253,18 @@ def get_parametrized_fixture_keys(item: nodes.Item, scope: Scope) -> Iterator[_K
         # cs.indices.items() is random order of argnames.  Need to
         # sort this so that different calls to
         # get_parametrized_fixture_keys will be deterministic.
-        for argname, param_index in sorted(cs.indices.items()):
+        for argname, param_id in sorted(cs.ids.items()):
             if cs._arg2scope[argname] != scope:
                 continue
-            param = SafeHashWrapper(cs.params.get(argname, param_index))
             if scope is Scope.Session:
-                key: _Key = (argname, param)
+                key: _Key = (argname, param_id)
             elif scope is Scope.Package:
-                key = (argname, param, item.path.parent)
+                key = (argname, param_id, item.path.parent)
             elif scope is Scope.Module:
-                key = (argname, param, item.path)
+                key = (argname, param_id, item.path)
             elif scope is Scope.Class:
                 item_cls = item.cls  # type: ignore[attr-defined]
-                key = (argname, param, item.path, item_cls)
+                key = (argname, param_id, item.path, item_cls)
             else:
                 assert_never(scope)
             yield key
@@ -658,6 +638,7 @@ class FixtureRequest:
         except (AttributeError, ValueError):
             param = NOTSET
             param_index = 0
+            param_id = ""
             has_params = fixturedef.params is not None
             fixtures_not_supported = getattr(funcitem, "nofuncargs", False)
             if has_params and fixtures_not_supported:
@@ -697,13 +678,14 @@ class FixtureRequest:
                 fail(msg, pytrace=False)
         else:
             param_index = funcitem.callspec.indices[argname]
+            param_id = funcitem.callspec.ids[argname]
             # If a parametrize invocation set a scope it will override
             # the static scope defined with the fixture function.
             with suppress(KeyError):
                 scope = funcitem.callspec._arg2scope[argname]
 
         subrequest = SubRequest(
-            self, scope, param, param_index, fixturedef, _ispytest=True
+            self, scope, param, param_index, param_id, fixturedef, _ispytest=True
         )
 
         # Check if a higher-level scoped fixture accesses a lower level one.
@@ -788,6 +770,7 @@ class SubRequest(FixtureRequest):
         scope: Scope,
         param: Any,
         param_index: int,
+        param_id: str,
         fixturedef: "FixtureDef[object]",
         *,
         _ispytest: bool = False,
@@ -798,6 +781,7 @@ class SubRequest(FixtureRequest):
         if param is not NOTSET:
             self.param = param
         self.param_index = param_index
+        self.param_id = param_id
         self._scope = scope
         self._fixturedef = fixturedef
         self._pyfuncitem = request._pyfuncitem
@@ -1072,7 +1056,7 @@ class FixtureDef(Generic[FixtureValue]):
             # note: comparison with `==` can fail (or be expensive) for e.g.
             # numpy arrays (#6497).
             cache_key = self.cached_result[1]
-            if my_cache_key is cache_key:
+            if my_cache_key == cache_key:
                 if self.cached_result[2] is not None:
                     _, val, tb = self.cached_result[2]
                     raise val.with_traceback(tb)
@@ -1089,7 +1073,7 @@ class FixtureDef(Generic[FixtureValue]):
         return result
 
     def cache_key(self, request: SubRequest) -> object:
-        return request.param_index if not hasattr(request, "param") else request.param
+        return request.param_id
 
     def __repr__(self) -> str:
         return "<FixtureDef argname={!r} scope={!r} baseid={!r}>".format(

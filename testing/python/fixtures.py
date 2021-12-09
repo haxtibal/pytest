@@ -1320,25 +1320,27 @@ class TestFixtureUsages:
 
             @pytest.fixture(scope="session")
             def fix(request):
-                print(f'prepare foo-%s' % request.param)
-                yield request.param
-                print(f'teardown foo-%s' % request.param)
+                value = request.param["data"] if isinstance(request.param, dict) else request.param
+                print(f'prepare foo-%s' % value)
+                yield value
+                print(f'teardown foo-%s' % value)
 
-            @pytest.mark.parametrize("fix", ["data1", "data2"], indirect=True)
+            @pytest.mark.parametrize("fix", [1, pytest.param({"data": 2}, id="2")], indirect=True)
             def test1(fix):
                 pass
 
-            @pytest.mark.parametrize("fix", ["data2", "data1"], indirect=True)
+            @pytest.mark.parametrize("fix", [pytest.param({"data": 2}, id="2"), 1], indirect=True)
             def test2(fix):
                 pass
         """
         )
+        # pytest.param({"data": 2}, id="userid2")
         result = pytester.runpytest("-s")
         output = result.stdout.str()
-        assert output.count("prepare foo-data1") == 1
-        assert output.count("prepare foo-data2") == 1
-        assert output.count("teardown foo-data1") == 1
-        assert output.count("teardown foo-data2") == 1
+        assert output.count("prepare foo-1") == 1
+        assert output.count("prepare foo-2") == 1
+        assert output.count("teardown foo-1") == 1
+        assert output.count("teardown foo-2") == 1
 
     def test_funcarg_parametrized_and_used_twice(self, pytester: Pytester) -> None:
         pytester.makepyfile(

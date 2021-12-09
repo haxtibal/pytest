@@ -9,6 +9,7 @@ import types
 import warnings
 from collections import Counter
 from collections import defaultdict
+from collections import OrderedDict
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -904,6 +905,55 @@ def hasnew(obj: object) -> bool:
     return False
 
 
+class ParamArgIdSet:
+    @staticmethod
+    def from_idvalset(
+        idx: int,
+        parameterset: ParameterSet,
+        argnames: Iterable[str],
+        idfn: Optional[Callable[[Any], Optional[object]]],
+        ids: Optional[List[Union[None, str]]],
+        nodeid: Optional[str],
+        config: Optional[Config],
+    ) -> "ParamArgIdSet":
+        if parameterset.id is not None:
+            return ParamArgIdSet(
+                parameterset.id, {argname: parameterset.id for argname in argnames}
+            )
+        id = None if ids is None or idx >= len(ids) else ids[idx]
+        if id is None:
+            this_id = []
+            this_id_by_arg = {}
+            for val, argname in zip(parameterset.values, argnames):
+                arg_id = _idval(val, argname, idx, idfn, nodeid=nodeid, config=config)
+                this_id.append(arg_id)
+                this_id_by_arg[argname] = arg_id
+            return ParamArgIdSet("-".join(this_id), this_id_by_arg)
+        parameter_id = _ascii_escaped_by_config(id, config)
+        return ParamArgIdSet(
+            parameter_id, {argname: parameter_id for argname in argnames}
+        )
+
+    def __init__(self, id: str, ids_by_arg: Dict[str, str]):
+        self.id = id
+        self.ids_by_arg = ids_by_arg
+        self.suffix = ""
+
+    def __eq__(self, other):
+        if isinstance(other, str):
+            return str(self) == other
+        return (self.id, self.suffix) == (other.id, other.suffix)
+
+    def __hash__(self):
+        return hash((self.id, self.suffix))
+
+    def __str__(self) -> str:
+        return f"{self.id}{self.suffix}"
+
+    def __repr__(self) -> str:
+        return str(self)
+
+
 @final
 @attr.s(frozen=True, slots=True, auto_attribs=True)
 class CallSpec2:
@@ -922,6 +972,8 @@ class CallSpec2:
     params: Dict[str, object] = attr.Factory(dict)
     # arg name -> arg index.
     indices: Dict[str, int] = attr.Factory(dict)
+    # arg name -> arg id
+    ids: Dict[str, str] = attr.Factory(OrderedDict)
     # Used for sorting parametrized resources.
     _arg2scope: Dict[str, Scope] = attr.Factory(dict)
     # Parts which will be added to the item's name in `[..]` separated by "-".
@@ -935,7 +987,7 @@ class CallSpec2:
         valtypes: Mapping[str, "Literal['params', 'funcargs']"],
         argnames: Iterable[str],
         valset: Iterable[object],
-        id: str,
+        id: ParamArgIdSet,
         marks: Iterable[Union[Mark, MarkDecorator]],
         scope: Scope,
         param_index: int,
@@ -943,6 +995,7 @@ class CallSpec2:
         funcargs = self.funcargs.copy()
         params = self.params.copy()
         indices = self.indices.copy()
+        ids = self.ids.copy()
         arg2scope = self._arg2scope.copy()
         for arg, val in zip(argnames, valset):
             if arg in params or arg in funcargs:
@@ -955,13 +1008,15 @@ class CallSpec2:
             else:
                 assert_never(valtype_for_arg)
             indices[arg] = param_index
+            ids[arg] = id.ids_by_arg[arg]
             arg2scope[arg] = scope
         return CallSpec2(
             funcargs=funcargs,
             params=params,
             arg2scope=arg2scope,
             indices=indices,
-            idlist=[*self._idlist, id],
+            ids=ids,
+            idlist=[*self._idlist, str(id)],
             marks=[*self.marks, *normalize_mark_list(marks)],
         )
 
@@ -1128,20 +1183,26 @@ class Metafunc:
             if generated_ids is not None:
                 ids = generated_ids
 
-        ids = self._resolve_arg_ids(
+        resolved_ids = self._resolve_arg_ids(
             argnames, ids, parameters, nodeid=self.definition.nodeid
         )
 
         # Store used (possibly generated) ids with parametrize Marks.
         if _param_mark and _param_mark._param_ids_from and generated_ids is None:
-            object.__setattr__(_param_mark._param_ids_from, "_param_ids_generated", ids)
+            object.__setattr__(
+                _param_mark._param_ids_from,
+                "_param_ids_generated",
+                [str(param_id) for param_id in resolved_ids],
+            )
 
         # Create the new calls: if we are parametrize() multiple times (by applying the decorator
         # more than once) then we accumulate those calls generating the cartesian product
         # of all calls.
         newcalls = []
         for callspec in self._calls or [CallSpec2()]:
-            for param_index, (param_id, param_set) in enumerate(zip(ids, parameters)):
+            for param_index, (param_id, param_set) in enumerate(
+                zip(resolved_ids, parameters)
+            ):
                 newcallspec = callspec.setmulti(
                     valtypes=arg_values_types,
                     argnames=argnames,
@@ -1165,7 +1226,7 @@ class Metafunc:
         ],
         parameters: Sequence[ParameterSet],
         nodeid: str,
-    ) -> List[str]:
+    ) -> List[ParamArgIdSet]:
         """Resolve the actual ids for the given argnames, based on the ``ids`` parameter given
         to ``parametrize``.
 
@@ -1385,28 +1446,6 @@ def _idval(
     return str(argname) + str(idx)
 
 
-def _idvalset(
-    idx: int,
-    parameterset: ParameterSet,
-    argnames: Iterable[str],
-    idfn: Optional[Callable[[Any], Optional[object]]],
-    ids: Optional[List[Union[None, str]]],
-    nodeid: Optional[str],
-    config: Optional[Config],
-) -> str:
-    if parameterset.id is not None:
-        return parameterset.id
-    id = None if ids is None or idx >= len(ids) else ids[idx]
-    if id is None:
-        this_id = [
-            _idval(val, argname, idx, idfn, nodeid=nodeid, config=config)
-            for val, argname in zip(parameterset.values, argnames)
-        ]
-        return "-".join(this_id)
-    else:
-        return _ascii_escaped_by_config(id, config)
-
-
 def idmaker(
     argnames: Iterable[str],
     parametersets: Iterable[ParameterSet],
@@ -1416,7 +1455,7 @@ def idmaker(
     nodeid: Optional[str] = None,
 ) -> List[str]:
     resolved_ids = [
-        _idvalset(
+        ParamArgIdSet.from_idvalset(
             valindex, parameterset, argnames, idfn, ids, config=config, nodeid=nodeid
         )
         for valindex, parameterset in enumerate(parametersets)
@@ -1427,16 +1466,17 @@ def idmaker(
     if len(unique_ids) != len(resolved_ids):
 
         # Record the number of occurrences of each test ID.
-        test_id_counts = Counter(resolved_ids)
+        test_id_counts = Counter([str(resolved_id) for resolved_id in resolved_ids])
 
         # Map the test ID to its next suffix.
         test_id_suffixes: Dict[str, int] = defaultdict(int)
 
         # Suffix non-unique IDs to make them unique.
         for index, test_id in enumerate(resolved_ids):
-            if test_id_counts[test_id] > 1:
-                resolved_ids[index] = f"{test_id}{test_id_suffixes[test_id]}"
-                test_id_suffixes[test_id] += 1
+            current_test_id = str(test_id)
+            if test_id_counts[current_test_id] > 1:
+                resolved_ids[index].suffix = test_id_suffixes[current_test_id]
+                test_id_suffixes[current_test_id] += 1
 
     return resolved_ids
 
